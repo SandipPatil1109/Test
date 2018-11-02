@@ -1,0 +1,228 @@
+package com.koel.Comman;
+
+
+import android.Manifest;
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.location.Location;
+import android.location.LocationManager;
+import android.os.AsyncTask;
+import android.os.Bundle;
+import android.os.IBinder;
+import android.support.annotation.NonNull;
+import android.support.v4.app.ActivityCompat;
+import android.util.Log;
+import android.widget.Toast;
+
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.GooglePlayServicesUtil;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.PendingResult;
+import com.google.android.gms.common.api.Status;
+import com.google.android.gms.location.LocationListener;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationServices;
+import com.koel.Bean.Distance;
+import com.koel.Bean.User_Master;
+import com.koel.database.DatabaseHandler;
+import com.koel.kirloskar.R;
+import com.koel.online.JSONParser;
+
+import org.apache.http.NameValuePair;
+import org.apache.http.message.BasicNameValuePair;
+import org.jetbrains.annotations.Nullable;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.math.RoundingMode;
+import java.text.DecimalFormat;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+
+
+public class LocServcheck extends Service implements
+        GoogleApiClient.ConnectionCallbacks,
+        GoogleApiClient.OnConnectionFailedListener {
+    public static final String BROADCAST_ACTION = "BroadcastLocation";
+    LocationRequest mLocationRequest;
+    GoogleApiClient mGoogleApiClient;
+    public static Location mCurrentLocation;
+    Comman objcom;
+    User_Master objUser;
+    SimpleDateFormat dateTimeForm = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+    private Distance currentDistance = new Distance();
+    DatabaseHandler objdb;
+    Intent intent;
+    JSONParser jsonParser = new JSONParser();
+    private static final int TWO_MINUTES = 1000 * 60 * 1;
+    Context context;
+    public MyLocationListener listener;
+
+    @Override
+    public void onCreate() {
+        context = this;
+        intent = new Intent(BROADCAST_ACTION);
+        //show error dialog if GoolglePlayServices not available
+        if (isGooglePlayServicesAvailable()) {
+            mLocationRequest = new LocationRequest();
+            mLocationRequest.setInterval(TWO_MINUTES);
+            mLocationRequest.setFastestInterval(TWO_MINUTES);
+            mLocationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
+            mLocationRequest.setSmallestDisplacement(100.0f);  /* min dist for location change, here it is 10 meter */
+            mGoogleApiClient = new GoogleApiClient.Builder(getApplicationContext())
+                    .addApi(LocationServices.API)
+                    .addConnectionCallbacks(this)
+                    .addOnConnectionFailedListener(this)
+                    .addOnConnectionFailedListener(this)
+                    .build();
+
+            mGoogleApiClient.connect();
+        }
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        return super.onStartCommand(intent, flags, startId);
+    }
+
+    @Nullable
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    //Check Google play is available or not
+    private boolean isGooglePlayServicesAvailable() {
+        int status = GooglePlayServicesUtil.isGooglePlayServicesAvailable(getApplicationContext());
+        return ConnectionResult.SUCCESS == status;
+    }
+
+
+    @Override
+    public void onConnected(Bundle bundle) {
+        startLocationUpdates();
+    }
+
+    @Override
+    public void onConnectionSuspended(int i) {
+
+    }
+
+    protected void startLocationUpdates() {
+        try {
+            listener = new MyLocationListener();
+            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                return;
+            }
+            PendingResult<Status> pendingResult = LocationServices.FusedLocationApi.requestLocationUpdates(mGoogleApiClient, mLocationRequest, (LocationListener) listener);
+        } catch (IllegalStateException e) {
+        }
+    }
+
+    @Override
+    public void onConnectionFailed(@NonNull ConnectionResult connectionResult) {
+
+    }
+
+    public class MyLocationListener implements LocationListener {
+
+        public void onLocationChanged(final Location loc) {
+            Log.i("LocServ changed", "Location changed");
+            loc.getLatitude();
+            loc.getLongitude();
+            double latitude = 0;
+            double longitude=0;
+            try {
+                DecimalFormat df = new DecimalFormat("#.#####");
+                df.setRoundingMode(RoundingMode.CEILING);
+                 latitude = Double.parseDouble(df.format(loc.getLatitude()));
+                 longitude = Double.parseDouble(df.format(loc.getLongitude()));
+
+            } catch (Exception e) {
+
+            }
+            intent.putExtra("Latitude", String.valueOf(latitude));
+            intent.putExtra("Longitude", String.valueOf(longitude));
+            intent.putExtra("Provider", loc.getProvider());
+            sendBroadcast(intent);
+            try {
+                objdb = new DatabaseHandler(getApplicationContext());
+                objcom = new Comman(getApplicationContext());
+                objdb.open();
+                objUser = objdb.getUserMaster();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+
+            try {
+                currentDistance.setLatitude(loc.getLatitude());
+                currentDistance.setLongitude(loc.getLongitude());
+                if (objcom.isNetworkConnected())
+                    new SendToServer().execute(Double.toString(longitude), Double.toString(latitude));
+            } catch (Exception e) {
+
+            }
+
+        }
+
+
+        public void onProviderDisabled(String provider) {
+//            Toast.makeText(getApplicationContext(), "Gps Disabled", Toast.LENGTH_SHORT).show();
+        }
+
+
+        public void onProviderEnabled(String provider) {
+//            Toast.makeText(getApplicationContext(), "Gps Enabled", Toast.LENGTH_SHORT).show();
+        }
+
+
+        public void onStatusChanged(String provider, int status, Bundle extras) {
+
+        }
+
+    }
+
+    class SendToServer extends AsyncTask<String, String, String> {
+        private String url_insert_location = getString(R.string.url) + "SaveUserLocation";
+
+        @Override
+        protected String doInBackground(String... la) {
+
+            try {
+                Log.i("LocServ", la[0]);
+                String longi = la[0];
+                String lati = la[1];
+
+                // Building Parameters
+                ArrayList<NameValuePair> params = new ArrayList<NameValuePair>();
+                params.add(new BasicNameValuePair("Longitude", longi+"18z"));
+                params.add(new BasicNameValuePair("Laititude", lati+"18z"));
+                params.add(new BasicNameValuePair("User_Id", objUser.getUser_Id()));
+                params.add(new BasicNameValuePair("CreateDateTime", dateTimeForm.format(new Date())));
+                // getting JSON Object
+                // Note that create product url accepts POST method
+                JSONObject JSONObjectData = new JSONObject();
+                for (NameValuePair nameValuePair : params) {
+                    try {
+                        JSONObjectData.put(nameValuePair.getName(), nameValuePair.getValue());
+                    } catch (JSONException e) {
+                    }
+                }
+                Log.i("LocServ parm", params + "/\n/ " + JSONObjectData.toString());
+                JSONObject json = jsonParser.makeHttpRequest(url_insert_location, "POST", JSONObjectData);
+                Log.d("LocServ Response", json.toString());
+
+            } catch (Exception e) {
+                Log.i("LocServ", e.toString());
+            }
+
+            return "call";
+        }
+
+
+    }
+}
+
